@@ -1,3 +1,4 @@
+
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -7,30 +8,60 @@ from telegram.ext import (
     filters
 )
 from google import genai
+from google.genai import types
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import asyncio
 import glob
 import os
 import sys
+import threading
 import time
 
 client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY"))
 
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
 
+MINO_SYSTEM_INSTRUCTION = """أنت مساعد ذكي باسم "مينو" تعمل داخل بوت تيليجرام.
+التزم تماماً بهذه المعلومات والهوية في ردودك:
+- اسمك: مينو.
+- من صنعك أو طورك: صنعك وطورك عباس عبد الرحمن عبد الكريم.
+- عمر مطورك: 15 سنة.
+- أسلوبك: ودود، واضح، ومفيد باللغة العربية، وعندما يُسأل عن اسمك أو من صنعك أو عمر مطورك أجب بدقة وبشكل طبيعي دون مبالغة."""
+
+
+def start_health_server():
+    class HealthHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+
+        def log_message(self, *args):
+            pass
+
+    port = int(os.environ.get("PORT", 10000))
+    HTTPServer(("0.0.0.0", port), HealthHandler).serve_forever()
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.effective_user.first_name
-    await update.message.reply_text(f"أهلاً وسهلاً بك يا {user_name}!")
+    await update.message.reply_text(f"أهلاً وسهلاً بك يا {user_name}! أنا مينو، كيف يمكنني مساعدتك اليوم؟")
+
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("أرسل أي سؤال وسأقوم بالرد عليه.")
+    await update.message.reply_text("أرسل أي سؤال وسأقوم بالرد عليه، أو استخدم /video متبوعاً بقصة لتوليد فيديو.")
+
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
-    
+
     try:
         response = client.models.generate_content(
             model="gemini-flash-lite-latest",
             contents=user_text,
+            config=types.GenerateContentConfig(
+                system_instruction=MINO_SYSTEM_INSTRUCTION,
+            ),
         )
         ai = response.text
     except Exception as e:
@@ -59,6 +90,7 @@ Rules:
 - CRITICAL: At the very end of the code, you MUST create the tkinter window, set up the Canvas, create a function to update time t from 0 to DURATION using canvas.after(33, ...), and call root.mainloop() so the script runs directly.
 - Output ONLY raw Python code. No explanation, no markdown. Arabic only inside string quotes.
 Story: """
+
 
 async def video_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     story = " ".join(context.args).strip()
@@ -114,7 +146,7 @@ def render_video(code_path, out_path):
     import runpy
     import subprocess
     import tkinter as tk
-    from PIL import ImageGrab
+    from PIL import Image, ImageGrab
     import imageio_ffmpeg
     from gtts import gTTS
     try:
@@ -133,6 +165,7 @@ def render_video(code_path, out_path):
 
     silent = out_path + ".silent.mp4"
     voice = out_path + ".voice.mp3"
+    snap = out_path + ".snap.png"
 
     rec = tk.Tk()
     rec.title("جار التسجيل... لا تغطِ هذه النافذة")
@@ -171,12 +204,23 @@ def render_video(code_path, out_path):
             draw_frame(t, canvas)
             rec.update()
             x, y = canvas.winfo_rootx(), canvas.winfo_rooty()
-            img = ImageGrab.grab(bbox=(x, y, x + canvas.winfo_width(), y + canvas.winfo_height()))
-            proc.stdin.write(img.convert("RGB").resize((800, 500)).tobytes())
+            w, h = canvas.winfo_width(), canvas.winfo_height()
+            if sys.platform.startswith("linux"):
+                subprocess.run(["scrot", "-a", f"{x},{y},{w},{h}", "-o", snap], check=True)
+                with Image.open(snap) as im:
+                    img = im.convert("RGB").resize((800, 500))
+            else:
+                img = ImageGrab.grab(bbox=(x, y, x + w, y + h)).convert("RGB").resize((800, 500))
+            proc.stdin.write(img.tobytes())
     finally:
         proc.stdin.close()
         proc.wait()
         rec.destroy()
+        if os.path.exists(snap):
+            try:
+                os.remove(snap)
+            except Exception:
+                pass
 
     subprocess.run([FFMPEG, "-y", "-i", silent, "-i", voice, "-c:v", "copy",
                     "-c:a", "aac", "-shortest", out_path],
@@ -184,6 +228,8 @@ def render_video(code_path, out_path):
 
 
 def main():
+    threading.Thread(target=start_health_server, daemon=True).start()
+
     app = Application.builder().token(TOKEN).read_timeout(30).connect_timeout(30).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -192,6 +238,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     app.run_polling()
+
 
 if __name__ == "__main__":
     if len(sys.argv) == 4 and sys.argv[1] == "--render":
